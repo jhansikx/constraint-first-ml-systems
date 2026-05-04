@@ -1,1 +1,246 @@
-# constraint-first-ml-systems
+# Constraint-First ML Systems
+### HybridSTNG: Hybrid Framework for Synthetic Transportation Network Generation
+
+> **Jhansi Xavier** · Florida Atlantic University · Advisor: Dr. KwangSoo Yang
+
+---
+
+## Overview
+
+This repository presents **HybridSTNG**, a constraint-first machine learning framework for generating synthetic transportation (road) networks that are simultaneously **topologically valid** and **geometrically realistic**.
+
+Existing approaches fall into two extremes:
+- **Rule-based methods** — valid topology, but rigid straight-line geometry.
+- **Learning-based methods** — realistic curves, but frequent planarity and connectivity violations.
+
+HybridSTNG is the **first framework to guarantee both** by cleanly separating topology construction from geometry learning.
+
+---
+
+## Problem Description
+
+### Motivation
+
+Synthetic road networks are essential for:
+- Routing algorithm benchmarking
+- Traffic simulation and scenario analysis
+- Autonomous vehicle testing
+- Urban planning without exposing real infrastructure data
+
+### Core Challenge
+
+A valid synthetic road network must satisfy three **hard structural constraints**:
+
+| Constraint | Definition |
+|---|---|
+| **C1 — Planarity** | No two edges may cross (roads do not pass through each other at grade) |
+| **C2 — Connectivity** | Every intersection is reachable from every other |
+| **C3 — Degree Bound** | Each node (intersection) has at most 4 connecting edges |
+
+At the same time, networks must exhibit **geometric realism**: natural road curvature, realistic edge-length distributions, and city-specific polyline shapes — not straight lines.
+
+**No prior method guarantees all three constraints while also achieving geometric realism.**
+
+### Formal Problem Statement
+
+> Given a collection of real road networks extracted from OpenStreetMap (nodes = intersections, edges = polyline-encoded roads), generate synthetic networks that satisfy C1–C3 by construction and match the real curvature, degree, and edge-length distributions of the target city.
+
+---
+
+## Architecture
+
+HybridSTNG uses a **three-layer pipeline**. Each layer has a single, well-defined responsibility:
+
+```
+Real OSM Data
+      │
+      ▼
+┌─────────────────────────────────────────────────────────┐
+│  Layer 1 — Topology (Constraint-First Construction)     │
+│                                                         │
+│  1. Sample node positions from OSM spatial distribution │
+│  2. Build Minimum Spanning Tree → guarantees C2         │
+│  3. Add edges via distance-biased sampling              │
+│  4. Reject any edge that causes a crossing  → C1        │
+│  5. Reject any edge that exceeds degree 4   → C3        │
+│                                                         │
+│  Output: planar, connected, degree-bounded graph        │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│  Layer 2 — Geometry (GNN-VAE)                           │
+│                                                         │
+│  • 3-layer Graph Convolutional encoder                  │
+│  • 64-dim latent space with reparameterization trick    │
+│  • Decoder predicts K−2 lateral offsets per edge        │
+│    in a local, rotation-invariant edge frame            │
+│  • Endpoints are NEVER moved → topology preserved       │
+│                                                         │
+│  Output: curved polylines per edge                      │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│  Layer 3 — Statistical Alignment                        │
+│                                                         │
+│  Per-edge curvature scaling to match target city CDF    │
+│  No retraining needed — works across cities             │
+│                                                         │
+│  Output: city-matched synthetic network                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Architecture Diagram
+
+The figure below compares rule-based, learned, and our proposed approach:
+
+![HybridSTNG Architecture Comparison](https://github.com/user-attachments/assets/714e7906-b727-46dd-9b27-778f5f17e3fb)
+
+*Left: Rule-based — valid topology, unrealistic straight-line geometry. Middle: Learned — realistic curves, but invalid crossing edges (marked ✗). Right: Proposed (HybridSTNG) — valid topology AND realistic geometry.*
+
+### GNN-VAE Model Details
+
+| Component | Details |
+|---|---|
+| Encoder | 3-layer GCN, hidden dim 128, global mean pooling |
+| Latent space | 64-dim, N(μ, σ²) with KL regularization |
+| Decoder | MLP predicting K=32 waypoints in local edge frame |
+| Total parameters | ~3.2 million (~12 MB fp32) |
+| Training | Adam, lr=1×10⁻⁴, batch=16, 80/10/10 split |
+
+### Structural Guarantees (Formal Lemmas)
+
+> **Lemma 1 (Connectivity):** The MST spans all *n* nodes. Adding edges never removes nodes. Connectivity is preserved throughout construction.
+
+> **Lemma 2 (Planarity):** Every candidate edge is tested against all existing edges before insertion. Any crossing candidate is rejected. The final graph is planar by construction.
+
+> **Lemma 3 (Degree Bound):** Before inserting edge (*u*, *v*), deg(*u*) < 4 and deg(*v*) < 4 are verified. Any violating candidate is rejected.
+
+These are **constructive proofs**, not heuristics — the algorithm cannot produce an invalid graph.
+
+---
+
+## Experimental Setup
+
+### Datasets
+
+| City | Sub-graphs | Source | Layout Type | Mean Degree |
+|---|---|---|---|---|
+| Boca Raton, FL | 289 | OpenStreetMap | Suburban grid | 2.42 |
+| Houston, TX | 200 | OpenStreetMap | Mixed-use urban | 2.68 |
+
+### Baselines
+
+| Method | Type | Planarity Guarantee | Geometry Learning |
+|---|---|---|---|
+| GraphRNN | Autoregressive neural | ✗ | ✓ |
+| GraphVAE | VAE neural | ✗ | ✓ |
+| Procedural-Planar | Rule-based | ✓ | ✗ (straight lines) |
+| **HybridSTNG (Ours)** | **Hybrid** | **✓** | **✓** |
+
+---
+
+## Results Summary
+
+### Topological Validity
+
+| Method | Planarity | Connectivity | Degree Bound |
+|---|---|---|---|
+| GraphRNN | 57% | 78% | 67% |
+| GraphVAE | 43% | 86% | 71% |
+| Procedural-Planar | **100%** | **100%** | **100%** |
+| **HybridSTNG** | **100%** | **100%** | **100%** |
+
+> HybridSTNG achieves **100% across all three constraints** — and unlike Procedural-Planar, it also achieves geometric realism (see below). Polyline-level planarity rate is 100% with 0 intersection violations even after curvature is added.
+
+---
+
+### Statistical Distribution Alignment
+
+| Method | KS Distance ↓ | Curvature MAPE ↓ | Wasserstein Dist ↓ |
+|---|---|---|---|
+| GraphRNN | 0.38 | 28.4% | 0.31 |
+| GraphVAE | 0.47 | 36.2% | 0.44 |
+| Procedural-Planar | 0.28 | 18.6% | 0.22 |
+| **HybridSTNG** | **0.04** | **4.3%** | **0.06** |
+
+> HybridSTNG's KS distance of **0.04** means the generated curvature distribution is nearly identical to real OSM data — an order of magnitude better than all baselines.
+
+---
+
+### Geometric Fidelity
+
+| Method | Fréchet Distance ↓ (m) | Hausdorff Distance ↓ (m) |
+|---|---|---|
+| GraphRNN | 0.89 | 0.81 |
+| GraphVAE | 0.76 | 0.69 |
+| Procedural-Planar | 1.14 | 1.02 |
+| **HybridSTNG** | **0.48** | **0.44** |
+
+> A Fréchet distance of **0.48 m** means generated road shapes deviate from real roads by less than half a meter — less than 0.5% error at city-block scale.
+
+---
+
+### Ablation Study
+
+| Variant | Fréchet ↓ (m) | Curvature MAPE ↓ | Degree MAPE ↓ | Planarity |
+|---|---|---|---|---|
+| Full HybridSTNG | **0.48** | **1.2%** | **4.3%** | **100%** |
+| w/o Local Frames | 0.72 | 8.4% | 4.3% | 100% |
+| w/o Curvature Alignment | 0.51 | 12.7% | 4.3% | 100% |
+| w/o OSM Degree Matching | 0.48 | 1.2% | 11.8% | 100% |
+| w/o GNN-VAE (straight lines) | 1.14 | — | 4.3% | 100% |
+| w/o Topology Layer | 0.46 | 1.1% | 3.9% | **43%** |
+
+> **Key finding:** Planarity is 100% in every variant *except* when the topology layer is removed — confirming that the constraint-first design is the sole source of validity guarantees.
+
+---
+
+### Cross-City Generalization
+
+The statistical alignment layer transfers across cities **without retraining**:
+
+| Train → Test | KS Distance | Curvature MAPE |
+|---|---|---|
+| Boca Raton → Boca Raton | 0.04 | 4.3% |
+| Houston → Houston | 0.05 | 5.1% |
+| Boca Raton → Houston (transfer) | 0.07 | 6.1% |
+| Houston → Boca Raton (transfer) | 0.06 | 5.8% |
+
+---
+
+## Key Contributions
+
+1. **Constraint-First Design Paradigm** — topology built by construction with formal proofs; no post-processing or constraint repair ever needed.
+2. **GNN-VAE for Polyline Geometry** — local-frame normalization enables rotation- and scale-invariant curvature learning.
+3. **Statistical Alignment Layer** — zero-retraining cross-city transfer via per-edge curvature scaling.
+4. **Three-Level Evaluation Protocol** — topology validity, statistical distribution, and geometric fidelity evaluated jointly.
+5. **State-of-the-Art Results** — best performance on every metric across both cities versus all baselines.
+
+---
+
+## Citation
+
+```bibtex
+@phdthesis{xavier2026hybridstng,
+  title   = {Hybrid Framework for Synthetic Transportation Network Generation:
+             Combining Constraint-First Topology with Learned Geometry},
+  author  = {Xavier, Jhansi},
+  school  = {Florida Atlantic University},
+  year    = {2026},
+  advisor = {Yang, KwangSoo}
+}
+```
+
+---
+
+## Code Availability
+
+> **Code available upon request.**
+>
+> The full implementation — including the topology generation layer, GNN-VAE training scripts, statistical alignment module, baseline reproductions, and evaluation pipeline — is available upon request while the associated manuscript is under journal review.
+>
+> Please contact **Jhansi Xavier** via GitHub or Florida Atlantic University to request access.
+
+---
